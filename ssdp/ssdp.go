@@ -18,6 +18,11 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
+func shouldSuppressUDPSendError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no route to host") || strings.Contains(msg, "network is unreachable")
+}
+
 const (
 	AddrString    = "239.255.255.250:1900"
 	AddrString6LL = "[ff02::c]:1900"
@@ -244,6 +249,9 @@ func (me *Server) makeNotifyMessage(target, nts string, extraHdrs [][2]string) [
 
 func (me *Server) send(buf []byte, addr *net.UDPAddr) {
 	if n, err := me.conn.WriteToUDP(buf, addr); err != nil {
+		if shouldSuppressUDPSendError(err) {
+			return
+		}
 		me.Logger.Printf("error writing to UDP socket: %s", err)
 	} else if n != len(buf) {
 		me.Logger.Printf("short write: %d/%d bytes", n, len(buf))
