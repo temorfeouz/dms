@@ -108,6 +108,8 @@ Usage of dms:
      - ignore comma separated list of paths (i.e. -ignore thumbnails,thumbs)
    * - ``-logHeaders``
      - log HTTP headers
+   * - ``-hlsSegmentDuration duration``
+     - live transcode segment duration (default 10s)
    * - ``-noProbe``
      - disable media probing with ffprobe
    * - ``-noTranscode``
@@ -130,6 +132,7 @@ An example json configuration file::
       "path": "/path/to/media/files",
       "friendlyName": "dms",
       "noTranscode": true,
+      "hlsSegmentDuration": "1s",
       "deviceIcon": "/path/to/icon.png",
       "deviceIconSizes": ["48:512","128:512"]
     }

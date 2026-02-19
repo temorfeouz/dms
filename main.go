@@ -53,6 +53,7 @@ type dmsConfig struct {
 	AllowedIpNets       []*net.IPNet
 	AllowDynamicStreams bool
 	TranscodeLogPattern string
+	HLSSegmentDuration  string
 }
 
 func (config *dmsConfig) load(configPath string) {
@@ -72,15 +73,16 @@ func (config *dmsConfig) load(configPath string) {
 
 // default config
 var config = &dmsConfig{
-	Path:             "",
-	IfName:           "",
-	Http:             ":1338",
-	FriendlyName:     "",
-	DeviceIcon:       "",
-	DeviceIconSizes:  []string{"48,128"},
-	LogHeaders:       false,
-	FFprobeCachePath: getDefaultFFprobeCachePath(),
-	ForceTranscodeTo: "",
+	Path:               "",
+	IfName:             "",
+	Http:               ":1338",
+	FriendlyName:       "",
+	DeviceIcon:         "",
+	DeviceIconSizes:    []string{"48,128"},
+	LogHeaders:         false,
+	FFprobeCachePath:   getDefaultFFprobeCachePath(),
+	ForceTranscodeTo:   "",
+	HLSSegmentDuration: "10s",
 }
 
 func getDefaultFFprobeCachePath() (path string) {
@@ -139,6 +141,7 @@ func mainErr() error {
 	allowedIps := flag.String("allowedIps", "", "allowed ip of clients, separated by comma")
 	forceTranscodeTo := flag.String("forceTranscodeTo", config.ForceTranscodeTo, "force transcoding to certain format, supported: 'chromecast', 'vp8', 'web'")
 	transcodeLogPattern := flag.String("transcodeLogPattern", "", "pattern where to write transcode logs to. The [tsname] placeholder is replaced with the name of the item currently being played. The default is $HOME/.dms/log/[tsname]")
+	hlsSegmentDuration := flag.Duration("hlsSegmentDuration", 10*time.Second, "live transcode segment duration, e.g. 1s, 3s, 10s")
 	flag.BoolVar(&config.NoTranscode, "noTranscode", false, "disable transcoding")
 	flag.BoolVar(&config.NoProbe, "noProbe", false, "disable media probing with ffprobe")
 	flag.BoolVar(&config.StallEventSubscribe, "stallEventSubscribe", false, "workaround for some bad event subscribers")
@@ -169,6 +172,7 @@ func mainErr() error {
 	config.ForceTranscodeTo = *forceTranscodeTo
 	config.IgnorePaths = strings.Split(*ignorePaths, ",")
 	config.TranscodeLogPattern = *transcodeLogPattern
+	config.HLSSegmentDuration = hlsSegmentDuration.String()
 
 	if config.TranscodeLogPattern == "" {
 		u, err := user.Current()
@@ -180,6 +184,11 @@ func mainErr() error {
 
 	if len(*configFilePath) > 0 {
 		config.load(*configFilePath)
+	}
+
+	segmentDuration, err := time.ParseDuration(config.HLSSegmentDuration)
+	if err != nil || segmentDuration <= 0 {
+		return fmt.Errorf("invalid hlsSegmentDuration %q: must be a positive duration like 1s, 3s, 10s", config.HLSSegmentDuration)
 	}
 
 	logger.Printf("device icon sizes are %q", config.DeviceIconSizes)
@@ -238,6 +247,7 @@ func mainErr() error {
 		AllowDynamicStreams: config.AllowDynamicStreams,
 		ForceTranscodeTo:    config.ForceTranscodeTo,
 		TranscodeLogPattern: config.TranscodeLogPattern,
+		HLSSegmentDuration:  segmentDuration,
 		NoProbe:             config.NoProbe,
 		Icons: func() []dms.Icon {
 			var icons []dms.Icon
@@ -286,7 +296,7 @@ func mainErr() error {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	<-sigs
-	err := dmsServer.Close()
+	err = dmsServer.Close()
 	if err != nil {
 		log.Fatal(err)
 	}

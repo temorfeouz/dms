@@ -286,7 +286,9 @@ type Server struct {
 	AllowDynamicStreams bool
 	// pattern where to write transcode logs to. The [tsname] placeholder is replaced with the name
 	// of the item currently being played. The default is $HOME/.dms/log/[tsname]
-	TranscodeLogPattern   string
+	TranscodeLogPattern string
+	// Segment duration used for live segmented transcode.
+	HLSSegmentDuration    time.Duration
 	Logger                log.Logger
 	eventingLogger        log.Logger
 	useFfmpegForThumbnail bool
@@ -349,7 +351,14 @@ type ffmpegInfoCacheKey struct {
 	ModTime int64
 }
 
-const hlsSegmentDuration = 10 * time.Second
+const defaultHLSSegmentDuration = 10 * time.Second
+
+func (me *Server) hlsSegmentDuration() time.Duration {
+	if me.HLSSegmentDuration <= 0 {
+		return defaultHLSSegmentDuration
+	}
+	return me.HLSSegmentDuration
+}
 
 func transcodeResources(host, path, resolution, duration string) (ret []upnpav.Resource) {
 	ret = make([]upnpav.Resource, 0, len(transcodes))
@@ -405,6 +414,7 @@ func buildHLSPlaylist(r *http.Request, segmentCount int, segmentDuration time.Du
 }
 
 func (me *Server) serveSegmentedTranscode(w http.ResponseWriter, r *http.Request, path_, tsname string) {
+	segmentDuration := me.hlsSegmentDuration()
 	ffInfo, _ := me.ffmpegProbe(path_)
 	if ffInfo == nil {
 		http.Error(w, "ffprobe failed", http.StatusInternalServerError)
@@ -418,7 +428,7 @@ func (me *Server) serveSegmentedTranscode(w http.ResponseWriter, r *http.Request
 	durationHeader := strconv.FormatFloat(duration.Seconds(), 'f', 6, 64)
 	w.Header().Set("Content-Duration", durationHeader)
 	w.Header().Set("X-Content-Duration", durationHeader)
-	segmentCount := int(math.Ceil(duration.Seconds() / hlsSegmentDuration.Seconds()))
+	segmentCount := int(math.Ceil(duration.Seconds() / segmentDuration.Seconds()))
 	if segmentCount < 1 {
 		segmentCount = 1
 	}
@@ -430,7 +440,7 @@ func (me *Server) serveSegmentedTranscode(w http.ResponseWriter, r *http.Request
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		io.WriteString(w, buildHLSPlaylist(r, segmentCount, hlsSegmentDuration))
+		io.WriteString(w, buildHLSPlaylist(r, segmentCount, segmentDuration))
 		return
 	}
 
@@ -455,8 +465,8 @@ func (me *Server) serveSegmentedTranscode(w http.ResponseWriter, r *http.Request
 		logFile = aLogFile
 	}
 
-	start := time.Duration(segmentIndex) * hlsSegmentDuration
-	length := hlsSegmentDuration
+	start := time.Duration(segmentIndex) * segmentDuration
+	length := segmentDuration
 	if remain := duration - start; remain < length {
 		length = remain
 	}

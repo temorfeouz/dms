@@ -231,3 +231,17 @@ func TestBuildHLSPlaylist(t *testing.T) {
 		t.Fatalf("missing segment urls: %q", playlist)
 	}
 }
+
+func TestHLSSegmentDurationDefault(t *testing.T) {
+	s := &Server{}
+	if got := s.hlsSegmentDuration(); got != defaultHLSSegmentDuration {
+		t.Fatalf("expected default segment duration %s, got %s", defaultHLSSegmentDuration, got)
+	}
+}
+
+func TestHLSSegmentDurationConfigured(t *testing.T) {
+	s := &Server{HLSSegmentDuration: time.Second}
+	if got := s.hlsSegmentDuration(); got != time.Second {
+		t.Fatalf("expected configured segment duration %s, got %s", time.Second, got)
+	}
+}
