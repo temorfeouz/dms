@@ -23,6 +23,10 @@ func shouldSuppressUDPSendError(err error) bool {
 	return strings.Contains(msg, "no route to host") || strings.Contains(msg, "network is unreachable")
 }
 
+func shouldSuppressMulticastHopLimitError(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "invalid argument")
+}
+
 const (
 	AddrString    = "239.255.255.250:1900"
 	AddrString6LL = "[ff02::c]:1900"
@@ -129,7 +133,9 @@ func makeConn(ifi net.Interface, netAddr *net.UDPAddr) (ret *net.UDPConn, err er
 	} else {
 		p := ipv6.NewPacketConn(ret)
 		if err := p.SetMulticastHopLimit(2); err != nil {
-			log.Print(err)
+			if !shouldSuppressMulticastHopLimitError(err) {
+				log.Print(err)
+			}
 		}
 	}
 	// if err := p.SetMulticastLoopback(true); err != nil {

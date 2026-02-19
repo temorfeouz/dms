@@ -22,6 +22,15 @@ func TestShouldSuppressUDPSendError(t *testing.T) {
 	}
 }
 
+func TestShouldSuppressMulticastHopLimitError(t *testing.T) {
+	if !shouldSuppressMulticastHopLimitError(errString("setsockopt: invalid argument")) {
+		t.Fatal("expected invalid argument to be suppressed")
+	}
+	if shouldSuppressMulticastHopLimitError(errString("permission denied")) {
+		t.Fatal("did not expect permission denied to be suppressed")
+	}
+}
+
 type errString string
 
 func (e errString) Error() string {
