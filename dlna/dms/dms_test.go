@@ -3,8 +3,14 @@ package dms
 import (
 	"bytes"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/anacrolix/dms/dlna"
 )
 
 type safeFilePathTestCase struct {
@@ -63,4 +69,156 @@ func TestResponse(t *testing.T) {
 	var buf bytes.Buffer
 	resp.Write(&buf)
 	t.Logf("%q", buf.String())
+}
+
+func TestParseDLNARangeHeaderOpenEnded(t *testing.T) {
+	r, err := parseDLNARangeHeader("npt=00:01:23.000-")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.Start != 83*time.Second {
+		t.Fatalf("unexpected start: %v", r.Start)
+	}
+	if r.End != -1 {
+		t.Fatalf("unexpected end: %v", r.End)
+	}
+}
+
+func TestParseDLNARangeHeaderWithDurationSuffix(t *testing.T) {
+	r, err := parseDLNARangeHeader("npt=00:01:23.000-00:02:00.000/00:10:00.000")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.Start != 83*time.Second {
+		t.Fatalf("unexpected start: %v", r.Start)
+	}
+	if r.End != 120*time.Second {
+		t.Fatalf("unexpected end: %v", r.End)
+	}
+}
+
+func TestParseByteRangeHeaderOpenEnded(t *testing.T) {
+	r, err := parseByteRangeHeader("bytes=100-")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.Start != 100 {
+		t.Fatalf("unexpected start: %d", r.Start)
+	}
+	if r.HasEnd {
+		t.Fatalf("unexpected end flag")
+	}
+}
+
+func TestParseByteRangeHeaderBounded(t *testing.T) {
+	r, err := parseByteRangeHeader("bytes=100-200")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.Start != 100 {
+		t.Fatalf("unexpected start: %d", r.Start)
+	}
+	if !r.HasEnd {
+		t.Fatalf("expected end flag")
+	}
+	if r.End != 200 {
+		t.Fatalf("unexpected end: %d", r.End)
+	}
+}
+
+func TestParseByteRangeHeaderRejectsUnsupported(t *testing.T) {
+	if _, err := parseByteRangeHeader("bytes=-200"); err == nil {
+		t.Fatalf("expected error")
+	}
+	if _, err := parseByteRangeHeader("bytes=0-10,20-30"); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestHandleHTTPByteRangeIgnoresNonBytesUnit(t *testing.T) {
+	w := httptest.NewRecorder()
+	h := make(http.Header)
+	h.Set("Range", "npt=00:01:23.000-")
+	_, partial, ok := handleHTTPByteRange(w, h, false)
+	if !ok {
+		t.Fatalf("expected ok")
+	}
+	if partial {
+		t.Fatalf("unexpected partial response")
+	}
+}
+
+func TestHandleDLNARangeFromHTTPRangeNPT(t *testing.T) {
+	w := httptest.NewRecorder()
+	h := make(http.Header)
+	h.Set("Range", "npt=00:01:23.000-")
+	r, partial, ok := handleDLNARange(w, h, false)
+	if !ok {
+		t.Fatalf("expected ok")
+	}
+	if !partial {
+		t.Fatalf("expected partial response")
+	}
+	if r.Start != 83*time.Second {
+		t.Fatalf("unexpected start: %v", r.Start)
+	}
+	if r.End != -1 {
+		t.Fatalf("unexpected end: %v", r.End)
+	}
+	if got := w.Header().Get(dlna.TimeSeekRangeDomain); got != "npt=00:01:23.000-/*" {
+		t.Fatalf("unexpected time seek response header: %q", got)
+	}
+}
+
+func TestHLSSegmentURL(t *testing.T) {
+	r := &http.Request{
+		URL: &url.URL{
+			Path: "/res",
+			RawQuery: url.Values{
+				"path":      {"/movie.mkv"},
+				"transcode": {"mpeg4"},
+			}.Encode(),
+		},
+	}
+	got := hlsSegmentURL(r, 7)
+	if !strings.Contains(got, "segment=7") {
+		t.Fatalf("missing segment in url: %q", got)
+	}
+	if !strings.Contains(got, "transcode=mpeg4") {
+		t.Fatalf("missing transcode in url: %q", got)
+	}
+}
+
+func TestBuildHLSPlaylist(t *testing.T) {
+	r := &http.Request{
+		URL: &url.URL{
+			Path: "/res",
+			RawQuery: url.Values{
+				"path":      {"/movie.mkv"},
+				"transcode": {"mpeg4"},
+			}.Encode(),
+		},
+	}
+	playlist := buildHLSPlaylist(r, 2, time.Second)
+	if !strings.Contains(playlist, "#EXTM3U") {
+		t.Fatalf("missing EXTM3U header: %q", playlist)
+	}
+	if !strings.Contains(playlist, "#EXT-X-PLAYLIST-TYPE:VOD") {
+		t.Fatalf("missing playlist type: %q", playlist)
+	}
+	if !strings.Contains(playlist, "#EXT-X-INDEPENDENT-SEGMENTS") {
+		t.Fatalf("missing independent segments tag: %q", playlist)
+	}
+	if !strings.Contains(playlist, "#EXT-X-ENDLIST") {
+		t.Fatalf("missing ENDLIST: %q", playlist)
+	}
+	if strings.Count(playlist, "#EXTINF:1.000,") != 2 {
+		t.Fatalf("unexpected EXTINF count: %q", playlist)
+	}
+	if strings.Count(playlist, "#EXT-X-DISCONTINUITY") != 1 {
+		t.Fatalf("unexpected discontinuity count: %q", playlist)
+	}
+	if !strings.Contains(playlist, "segment=0") || !strings.Contains(playlist, "segment=1") {
+		t.Fatalf("missing segment urls: %q", playlist)
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -348,12 +349,15 @@ type ffmpegInfoCacheKey struct {
 	ModTime int64
 }
 
+const hlsSegmentDuration = 10 * time.Second
+
 func transcodeResources(host, path, resolution, duration string) (ret []upnpav.Resource) {
 	ret = make([]upnpav.Resource, 0, len(transcodes))
 	for k, v := range transcodes {
 		ret = append(ret, upnpav.Resource{
-			ProtocolInfo: fmt.Sprintf("http-get:*:%s:%s", v.mimeType, dlna.ContentFeatures{
+			ProtocolInfo: fmt.Sprintf("http-get:*:%s:%s", "application/vnd.apple.mpegurl", dlna.ContentFeatures{
 				SupportTimeSeek: true,
+				SupportRange:    true,
 				Transcoded:      true,
 				ProfileName:     v.DLNAProfileName,
 			}.String()),
@@ -373,15 +377,197 @@ func transcodeResources(host, path, resolution, duration string) (ret []upnpav.R
 	return
 }
 
+func hlsSegmentURL(r *http.Request, index int) string {
+	u := *r.URL
+	q := u.Query()
+	q.Set("segment", strconv.Itoa(index))
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func buildHLSPlaylist(r *http.Request, segmentCount int, segmentDuration time.Duration) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "#EXTM3U")
+	fmt.Fprintln(&b, "#EXT-X-VERSION:3")
+	fmt.Fprintln(&b, "#EXT-X-PLAYLIST-TYPE:VOD")
+	fmt.Fprintln(&b, "#EXT-X-INDEPENDENT-SEGMENTS")
+	fmt.Fprintf(&b, "#EXT-X-TARGETDURATION:%d\n", int(math.Ceil(segmentDuration.Seconds())))
+	fmt.Fprintln(&b, "#EXT-X-MEDIA-SEQUENCE:0")
+	for i := 0; i < segmentCount; i++ {
+		if i > 0 {
+			fmt.Fprintln(&b, "#EXT-X-DISCONTINUITY")
+		}
+		fmt.Fprintf(&b, "#EXTINF:%.3f,\n", segmentDuration.Seconds())
+		fmt.Fprintln(&b, hlsSegmentURL(r, i))
+	}
+	fmt.Fprintln(&b, "#EXT-X-ENDLIST")
+	return b.String()
+}
+
+func (me *Server) serveSegmentedTranscode(w http.ResponseWriter, r *http.Request, path_, tsname string) {
+	ffInfo, _ := me.ffmpegProbe(path_)
+	if ffInfo == nil {
+		http.Error(w, "ffprobe failed", http.StatusInternalServerError)
+		return
+	}
+	duration, err := ffInfo.Duration()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	segmentCount := int(math.Ceil(duration.Seconds() / hlsSegmentDuration.Seconds()))
+	if segmentCount < 1 {
+		segmentCount = 1
+	}
+
+	segment := r.URL.Query().Get("segment")
+	if segment == "" {
+		w.Header().Set("content-type", "application/vnd.apple.mpegurl")
+		if r.Method == "HEAD" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		io.WriteString(w, buildHLSPlaylist(r, segmentCount, hlsSegmentDuration))
+		return
+	}
+
+	segmentIndex, err := strconv.Atoi(segment)
+	if err != nil || segmentIndex < 0 || segmentIndex >= segmentCount {
+		http.Error(w, "bad segment index", http.StatusBadRequest)
+		return
+	}
+
+	logTsName := filepath.Join(tsname, filepath.Base(path_))
+	stderrPath := strings.Replace(me.TranscodeLogPattern, "[tsname]", logTsName, -1)
+	var logFile io.Writer
+	if stderrPath != "" {
+		os.MkdirAll(filepath.Dir(stderrPath), 0o750)
+		aLogFile, err := os.Create(stderrPath)
+		if err != nil {
+			log.Printf("couldn't create transcode log file: %s", err)
+		} else {
+			defer aLogFile.Close()
+			log.Printf("logging transcode to %q", stderrPath)
+		}
+		logFile = aLogFile
+	}
+
+	start := time.Duration(segmentIndex) * hlsSegmentDuration
+	length := hlsSegmentDuration
+	if remain := duration - start; remain < length {
+		length = remain
+	}
+	w.Header().Set("content-type", "video/mp2t")
+	if r.Method == "HEAD" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	p, err := transcode.SegmentTranscode(path_, start, length, logFile)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer p.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-r.Context().Done():
+			p.Close()
+		case <-done:
+		}
+	}()
+	io.Copy(w, p)
+}
+
 func parseDLNARangeHeader(val string) (ret dlna.NPTRange, err error) {
 	if !strings.HasPrefix(val, "npt=") {
 		err = errors.New("bad prefix")
 		return
 	}
-	ret, err = dlna.ParseNPTRange(val[len("npt="):])
+	nptRange := strings.TrimSpace(val[len("npt="):])
+	nptRange, _, _ = strings.Cut(nptRange, "/")
+	if !strings.Contains(nptRange, "-") {
+		err = errors.New("bad npt range")
+		return
+	}
+	if strings.HasSuffix(nptRange, "-*") {
+		nptRange = strings.TrimSuffix(nptRange, "*")
+	}
+	ret, err = dlna.ParseNPTRange(nptRange)
 	if err != nil {
 		return
 	}
+	if strings.HasSuffix(nptRange, "-") {
+		ret.End = -1
+	}
+	return
+}
+
+type byteRange struct {
+	Start, End int64
+	HasEnd     bool
+}
+
+func parseByteRangeHeader(val string) (ret byteRange, err error) {
+	if !strings.HasPrefix(val, "bytes=") {
+		err = errors.New("bad range unit")
+		return
+	}
+	rest := strings.TrimSpace(val[len("bytes="):])
+	if strings.Contains(rest, ",") {
+		err = errors.New("multiple byte ranges are not supported")
+		return
+	}
+	start, end, ok := strings.Cut(rest, "-")
+	if !ok || strings.TrimSpace(start) == "" {
+		err = errors.New("bad byte range")
+		return
+	}
+	ret.Start, err = strconv.ParseInt(strings.TrimSpace(start), 10, 64)
+	if err != nil || ret.Start < 0 {
+		err = errors.New("bad byte range start")
+		return
+	}
+	end = strings.TrimSpace(end)
+	if end != "" {
+		ret.End, err = strconv.ParseInt(end, 10, 64)
+		if err != nil || ret.End < ret.Start {
+			err = errors.New("bad byte range end")
+			return
+		}
+		ret.HasEnd = true
+	}
+	return
+}
+
+// Handles HTTP byte-range requests for transcodes.
+func handleHTTPByteRange(w http.ResponseWriter, hs http.Header, rangeAlreadyHandled bool) (r byteRange, partialResponse, ok bool) {
+	if rangeAlreadyHandled {
+		ok = true
+		return
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	h := strings.TrimSpace(hs.Get("Range"))
+	if h == "" {
+		ok = true
+		return
+	}
+	if !strings.HasPrefix(strings.ToLower(h), "bytes=") {
+		ok = true
+		return
+	}
+	var err error
+	r, err = parseByteRangeHeader(h)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	partialResponse = true
+	if r.HasEnd {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/*", r.Start, r.End))
+	}
+	ok = true
 	return
 }
 
@@ -389,12 +575,22 @@ func parseDLNARangeHeader(val string) (ret dlna.NPTRange, err error) {
 // headers. Returns !ok if there was an error and the caller should stop
 // handling the request.
 func handleDLNARange(w http.ResponseWriter, hs http.Header, dynamicMode bool) (r dlna.NPTRange, partialResponse, ok bool) {
-	if dynamicMode || len(hs[http.CanonicalHeaderKey(dlna.TimeSeekRangeDomain)]) == 0 {
+	if dynamicMode {
+		ok = true
+		return
+	}
+	h := strings.TrimSpace(hs.Get(dlna.TimeSeekRangeDomain))
+	if h == "" {
+		httpRange := strings.TrimSpace(hs.Get("Range"))
+		if strings.HasPrefix(strings.ToLower(httpRange), "npt=") {
+			h = httpRange
+		}
+	}
+	if h == "" {
 		ok = true
 		return
 	}
 	partialResponse = true
-	h := hs.Get(dlna.TimeSeekRangeDomain)
 	r, err := parseDLNARangeHeader(h)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -404,7 +600,7 @@ func handleDLNARange(w http.ResponseWriter, hs http.Header, dynamicMode bool) (r
 	// (*) duration instead.
 	//
 	// TODO: Check that the request range can't already have /.
-	w.Header().Set(dlna.TimeSeekRangeDomain, h+"/*")
+	w.Header().Set(dlna.TimeSeekRangeDomain, strings.TrimSpace(strings.SplitN(h, "/", 2)[0])+"/*")
 	ok = true
 	return
 }
@@ -420,11 +616,16 @@ func writeResponseCode(w http.ResponseWriter, partialResponse bool) {
 }
 
 func (me *Server) serveDLNATranscode(w http.ResponseWriter, r *http.Request, path_ string, ts transcodeSpec, tsname string, dynamicMode bool) {
+	if !dynamicMode {
+		me.serveSegmentedTranscode(w, r, path_, tsname)
+		return
+	}
 	w.Header().Set(dlna.TransferModeDomain, "Streaming")
 	w.Header().Set("content-type", ts.mimeType)
 	w.Header().Set(dlna.ContentFeaturesDomain, (dlna.ContentFeatures{
 		Transcoded:      true,
 		SupportTimeSeek: !dynamicMode,
+		SupportRange:    true,
 		ProfileName:     ts.DLNAProfileName,
 		Flags:           ts.DLNAFlags,
 	}).String())
@@ -433,13 +634,6 @@ func (me *Server) serveDLNATranscode(w http.ResponseWriter, r *http.Request, pat
 	// function, it alone determines if we'll give a partial response.
 	range_, partialResponse, ok := handleDLNARange(w, r.Header, dynamicMode)
 	if !ok {
-		return
-	}
-
-	// Samsung Frame TVs send a HEAD request first. If we don't terminate processing here,
-	// the TV will keep reading the data and crash eventually :)
-	if r.Method == "HEAD" {
-		writeResponseCode(w, partialResponse)
 		return
 	}
 
@@ -471,18 +665,55 @@ func (me *Server) serveDLNATranscode(w http.ResponseWriter, r *http.Request, pat
 		}
 		logFile = aLogFile
 	}
+
+	byteRange, byteRangePartialResponse, ok := handleHTTPByteRange(w, r.Header, partialResponse)
+	if !ok {
+		return
+	}
+	partialResponse = partialResponse || byteRangePartialResponse
+
+	// Samsung Frame TVs send a HEAD request first. If we don't terminate processing here,
+	// the TV will keep reading the data and crash eventually :)
+	if r.Method == "HEAD" {
+		writeResponseCode(w, partialResponse)
+		return
+	}
 	p, err := ts.Transcode(path_, range_.Start, range_.End-range_.Start, logFile)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer p.Close()
+	copyDone := make(chan struct{})
+	defer close(copyDone)
+	go func() {
+		select {
+		case <-r.Context().Done():
+			p.Close()
+		case <-copyDone:
+		}
+	}()
 	// I recently switched this to returning 200 if no range is specified for
 	// pure UPnP clients. It's possible that DLNA clients will *always* expect
 	// 206. It appears the HTTP standard requires that 206 only be used if a
 	// response is not interpreting any range headers.
+	if byteRangePartialResponse && byteRange.Start > 0 {
+		_, err = io.CopyN(io.Discard, p, byteRange.Start)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				http.Error(w, "range out of bounds", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			return
+		}
+	}
+
 	writeResponseCode(w, partialResponse)
-	io.Copy(w, p)
+	if byteRangePartialResponse && byteRange.HasEnd {
+		io.CopyN(w, p, byteRange.End-byteRange.Start+1)
+	} else {
+		io.Copy(w, p)
+	}
 }
 
 func init() {

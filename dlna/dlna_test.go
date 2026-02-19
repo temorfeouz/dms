@@ -14,3 +14,15 @@ func TestContentFeaturesString(t *testing.T) {
 		t.Fatal(a)
 	}
 }
+
+func TestContentFeaturesStringWithByteRange(t *testing.T) {
+	a := ContentFeatures{
+		Transcoded:      true,
+		SupportTimeSeek: true,
+		SupportRange:    true,
+	}.String()
+	e := "DLNA.ORG_OP=11;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+	if e != a {
+		t.Fatal(a)
+	}
+}

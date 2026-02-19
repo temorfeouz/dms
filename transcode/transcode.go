@@ -3,12 +3,14 @@
 package transcode
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/anacrolix/ffprobe"
@@ -23,7 +25,7 @@ func transcodePipe(args []string, stderr io.Writer) (r io.ReadCloser, err error)
 	log.Println("transcode command:", args)
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stderr = stderr
-	r, err = cmd.StdoutPipe()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return
 	}
@@ -31,13 +33,51 @@ func transcodePipe(args []string, stderr io.Writer) (r io.ReadCloser, err error)
 	if err != nil {
 		return
 	}
+	waitCh := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
+		waitCh <- err
 		if err != nil {
 			log.Printf("command %s failed: %s", args, err)
 		}
 	}()
+	r = &commandReadCloser{
+		stdout:  stdout,
+		cmd:     cmd,
+		waitErr: waitCh,
+	}
 	return
+}
+
+type commandReadCloser struct {
+	stdout  io.ReadCloser
+	cmd     *exec.Cmd
+	waitErr <-chan error
+	once    sync.Once
+}
+
+func (me *commandReadCloser) Read(p []byte) (int, error) {
+	return me.stdout.Read(p)
+}
+
+func (me *commandReadCloser) Close() (err error) {
+	me.once.Do(func() {
+		err = me.stdout.Close()
+		if me.cmd.Process != nil {
+			if killErr := me.cmd.Process.Kill(); killErr != nil && !errorsIsProcessDone(killErr) {
+				err = killErr
+			}
+		}
+		<-me.waitErr
+	})
+	return
+}
+
+func errorsIsProcessDone(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, os.ErrProcessDone)
 }
 
 // Return a series of ffmpeg arguments that pick specific codecs for specific
@@ -208,6 +248,38 @@ func WebTranscode(path string, start, length time.Duration, stderr io.Writer) (r
 	}
 	args = append(args, []string{
 		"-f", "mp4",
+		"pipe:",
+	}...)
+	return transcodePipe(args, stderr)
+}
+
+// Returns a stable MPEG-TS segment suitable for HLS-style segmented playback.
+func SegmentTranscode(path string, start, length time.Duration, stderr io.Writer) (r io.ReadCloser, err error) {
+	args := []string{
+		ffmpegExecutable(),
+		"-threads", strconv.FormatInt(int64(runtime.NumCPU()), 10),
+		"-i", path,
+		"-ss", FormatDurationSexagesimal(start),
+	}
+	if length > 0 {
+		args = append(args, []string{
+			"-t", FormatDurationSexagesimal(length),
+		}...)
+	}
+	args = append(args, []string{
+		"-c:v", "mpeg2video",
+		"-q:v", "5",
+		"-g", "1",
+		"-bf", "0",
+		"-pix_fmt", "yuv420p",
+		"-c:a", "mp2",
+		"-b:a", "192k",
+		"-ac", "2",
+		"-avoid_negative_ts", "make_zero",
+		"-muxpreload", "0",
+		"-muxdelay", "0",
+		"-mpegts_flags", "+resend_headers",
+		"-f", "mpegts",
 		"pipe:",
 	}...)
 	return transcodePipe(args, stderr)
