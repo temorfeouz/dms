@@ -121,6 +121,9 @@ Usage of dms:
    * - ``-transcodeLogPattern``
      - pattern where to write transcode logs to. The ``[tsname]`` placeholder is replaced with the name of the item currently being played. The default is ``$HOME/.dms/log/[tsname]``. You may turn off transcode logging entirely by setting it to ``/dev/null``. You may log to stderr by setting ``/dev/stderr``.
 
+set:
+    * - FFMPEG_PATH for custom ffpeg path
+    * - FFMPEG_QUALITY ffmpeg encoding quality
 An example json configuration file::
 
     {

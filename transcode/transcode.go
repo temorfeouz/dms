@@ -5,6 +5,7 @@ package transcode
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -44,8 +45,12 @@ func transcodePipe(args []string, stderr io.Writer) (r io.ReadCloser, err error)
 func streamArgs(s map[string]interface{}) (ret []string) {
 	defer func() {
 		if len(ret) != 0 {
+			if _, ok := s["index"]; !ok {
+				return
+			}
+
 			ret = append(ret, []string{
-				"-map", "0:" + strconv.Itoa(int(s["index"].(float64))),
+				"-map", "0:" + fmt.Sprintf("%v", s["index"]),
 			}...)
 		}
 	}()
@@ -70,11 +75,30 @@ func streamArgs(s map[string]interface{}) (ret []string) {
 	}
 	return
 }
+func ffmpegExecutable() string {
+	if tmp := os.Getenv("FFMPEG_PATH"); tmp != "" {
+		log.Println("use custom ffmpeg", tmp)
+
+		return tmp
+	}
+
+	return "ffmpeg"
+}
+
+func quality() string {
+	if tmp := os.Getenv("FFMPEG_QUALITY"); tmp != "" {
+		log.Println("use quality", tmp)
+
+		return tmp
+	}
+
+	return "4"
+}
 
 // Streams the desired file in the MPEG_PS_PAL DLNA profile.
 func Transcode(path string, start, length time.Duration, stderr io.Writer) (r io.ReadCloser, err error) {
 	args := []string{
-		"ffmpeg",
+		ffmpegExecutable(),
 		"-threads", strconv.FormatInt(int64(runtime.NumCPU()), 10),
 		"-async", "1",
 		"-ss", FormatDurationSexagesimal(start),
@@ -124,7 +148,7 @@ func VP8Transcode(path string, start, length time.Duration, stderr io.Writer) (r
 // Returns a stream of Chromecast supported matroska.
 func ChromecastTranscode(path string, start, length time.Duration, stderr io.Writer) (r io.ReadCloser, err error) {
 	args := []string{
-		"ffmpeg",
+		ffmpegExecutable(),
 		"-ss", FormatDurationSexagesimal(start),
 		"-i", path,
 		"-c:v", "libx264", "-preset", "ultrafast", "-profile:v", "high", "-level", "5.0",
@@ -142,10 +166,33 @@ func ChromecastTranscode(path string, start, length time.Duration, stderr io.Wri
 	return transcodePipe(args, stderr)
 }
 
+// Returns a stream of mpeg4 video for Panasonic TV
+func MPEG4Transcode(path string, start, length time.Duration, stderr io.Writer) (r io.ReadCloser, err error) {
+	args := []string{
+		ffmpegExecutable(),
+		"-ss", FormatDurationSexagesimal(start),
+		"-i", path,
+		"-vcodec", "mpeg4",
+		"-threads", "2",
+		"-q:v", quality(),
+		"-movflags", "+faststart+frag_keyframe+empty_moov",
+	}
+	if length > 0 {
+		args = append(args, []string{
+			"-t", FormatDurationSexagesimal(length),
+		}...)
+	}
+	args = append(args, []string{
+		"-f", "mp4",
+		"pipe:",
+	}...)
+	return transcodePipe(args, stderr)
+}
+
 // Returns a stream of h264 video and mp3 audio
 func WebTranscode(path string, start, length time.Duration, stderr io.Writer) (r io.ReadCloser, err error) {
 	args := []string{
-		"ffmpeg",
+		ffmpegExecutable(),
 		"-ss", FormatDurationSexagesimal(start),
 		"-i", path,
 		"-pix_fmt", "yuv420p",

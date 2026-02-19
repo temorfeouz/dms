@@ -73,6 +73,7 @@ var transcodes = map[string]transcodeSpec{
 	},
 	"vp8":        {mimeType: "video/webm", Transcode: transcode.VP8Transcode},
 	"chromecast": {mimeType: "video/mp4", Transcode: transcode.ChromecastTranscode},
+	"mpeg4":      {mimeType: "video/mp4", Transcode: transcode.MPEG4Transcode},
 	"web":        {mimeType: "video/mp4", Transcode: transcode.WebTranscode},
 }
 
