@@ -387,6 +387,7 @@ func hlsSegmentURL(r *http.Request, index int) string {
 
 func buildHLSPlaylist(r *http.Request, segmentCount int, segmentDuration time.Duration) string {
 	var b strings.Builder
+	basePDT := time.Unix(0, 0).UTC()
 	fmt.Fprintln(&b, "#EXTM3U")
 	fmt.Fprintln(&b, "#EXT-X-VERSION:3")
 	fmt.Fprintln(&b, "#EXT-X-PLAYLIST-TYPE:VOD")
@@ -394,9 +395,8 @@ func buildHLSPlaylist(r *http.Request, segmentCount int, segmentDuration time.Du
 	fmt.Fprintf(&b, "#EXT-X-TARGETDURATION:%d\n", int(math.Ceil(segmentDuration.Seconds())))
 	fmt.Fprintln(&b, "#EXT-X-MEDIA-SEQUENCE:0")
 	for i := 0; i < segmentCount; i++ {
-		if i > 0 {
-			fmt.Fprintln(&b, "#EXT-X-DISCONTINUITY")
-		}
+		pdt := basePDT.Add(time.Duration(i) * segmentDuration).Format(time.RFC3339Nano)
+		fmt.Fprintf(&b, "#EXT-X-PROGRAM-DATE-TIME:%s\n", pdt)
 		fmt.Fprintf(&b, "#EXTINF:%.3f,\n", segmentDuration.Seconds())
 		fmt.Fprintln(&b, hlsSegmentURL(r, i))
 	}
@@ -415,6 +415,9 @@ func (me *Server) serveSegmentedTranscode(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	durationHeader := strconv.FormatFloat(duration.Seconds(), 'f', 6, 64)
+	w.Header().Set("Content-Duration", durationHeader)
+	w.Header().Set("X-Content-Duration", durationHeader)
 	segmentCount := int(math.Ceil(duration.Seconds() / hlsSegmentDuration.Seconds()))
 	if segmentCount < 1 {
 		segmentCount = 1

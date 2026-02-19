@@ -255,11 +255,27 @@ func WebTranscode(path string, start, length time.Duration, stderr io.Writer) (r
 
 // Returns a stable MPEG-TS segment suitable for HLS-style segmented playback.
 func SegmentTranscode(path string, start, length time.Duration, stderr io.Writer) (r io.ReadCloser, err error) {
+	coarseSeek := start
+	fineSeek := time.Duration(0)
+	const fineSeekWindow = 2 * time.Second
+	if start > fineSeekWindow {
+		coarseSeek = start - fineSeekWindow
+		fineSeek = fineSeekWindow
+	} else {
+		coarseSeek = 0
+		fineSeek = start
+	}
+
 	args := []string{
 		ffmpegExecutable(),
 		"-threads", strconv.FormatInt(int64(runtime.NumCPU()), 10),
+		"-ss", FormatDurationSexagesimal(coarseSeek),
 		"-i", path,
-		"-ss", FormatDurationSexagesimal(start),
+	}
+	if fineSeek > 0 {
+		args = append(args, []string{
+			"-ss", FormatDurationSexagesimal(fineSeek),
+		}...)
 	}
 	if length > 0 {
 		args = append(args, []string{
@@ -269,15 +285,14 @@ func SegmentTranscode(path string, start, length time.Duration, stderr io.Writer
 	args = append(args, []string{
 		"-c:v", "mpeg2video",
 		"-q:v", "5",
-		"-g", "1",
 		"-bf", "0",
 		"-pix_fmt", "yuv420p",
 		"-c:a", "mp2",
 		"-b:a", "192k",
 		"-ac", "2",
-		"-avoid_negative_ts", "make_zero",
 		"-muxpreload", "0",
 		"-muxdelay", "0",
+		"-output_ts_offset", FormatDurationSexagesimal(start),
 		"-mpegts_flags", "+resend_headers",
 		"-f", "mpegts",
 		"pipe:",

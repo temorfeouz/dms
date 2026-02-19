@@ -215,8 +215,17 @@ func TestBuildHLSPlaylist(t *testing.T) {
 	if strings.Count(playlist, "#EXTINF:1.000,") != 2 {
 		t.Fatalf("unexpected EXTINF count: %q", playlist)
 	}
-	if strings.Count(playlist, "#EXT-X-DISCONTINUITY") != 1 {
-		t.Fatalf("unexpected discontinuity count: %q", playlist)
+	if strings.Count(playlist, "#EXT-X-DISCONTINUITY") != 0 {
+		t.Fatalf("unexpected discontinuity tag: %q", playlist)
+	}
+	if strings.Count(playlist, "#EXT-X-PROGRAM-DATE-TIME:") != 2 {
+		t.Fatalf("unexpected program-date-time count: %q", playlist)
+	}
+	if !strings.Contains(playlist, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:00:00Z") {
+		t.Fatalf("missing first program-date-time: %q", playlist)
+	}
+	if !strings.Contains(playlist, "#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:00:01Z") {
+		t.Fatalf("missing second program-date-time: %q", playlist)
 	}
 	if !strings.Contains(playlist, "segment=0") || !strings.Contains(playlist, "segment=1") {
 		t.Fatalf("missing segment urls: %q", playlist)
