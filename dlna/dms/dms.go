@@ -25,6 +25,7 @@ import (
 
 	"github.com/anacrolix/ffprobe"
 	"github.com/anacrolix/log"
+	"github.com/patrickmn/go-cache"
 
 	"github.com/anacrolix/dms/dlna"
 	"github.com/anacrolix/dms/soap"
@@ -251,7 +252,8 @@ type Server struct {
 	OnBrowseMetadata       func(path string, rootObjectPath string, host, userAgent string) (ret interface{}, err error)
 	rootDescXML            []byte
 	rootDeviceUUID         string
-	FFProbeCache           Cache
+	FFCache                Cache
+	ServiceCache           *cache.Cache
 	closed                 chan struct{}
 	ssdpStopped            chan struct{}
 	// The service SOAP handler keyed by service URN.
@@ -283,9 +285,10 @@ type Server struct {
 	AllowDynamicStreams bool
 	// pattern where to write transcode logs to. The [tsname] placeholder is replaced with the name
 	// of the item currently being played. The default is $HOME/.dms/log/[tsname]
-	TranscodeLogPattern string
-	Logger              log.Logger
-	eventingLogger      log.Logger
+	TranscodeLogPattern   string
+	Logger                log.Logger
+	eventingLogger        log.Logger
+	useFfmpegForThumbnail bool
 }
 
 // UPnP SOAP service.
@@ -652,7 +655,58 @@ func (s *Server) filePath(_path string) string {
 }
 
 func (me *Server) serveIcon(w http.ResponseWriter, r *http.Request) {
+	var (
+		body []byte
+		mime string
+	)
+	if me.useFfmpegForThumbnail {
+		body, mime = me.serveIconFfmpeg(r)
+	} else {
+		body, mime = me.serveIconFfmpegthumbnailer(r)
+		if body == nil {
+			me.useFfmpegForThumbnail = true
+			body, mime = me.serveIconFfmpeg(r)
+		}
+	}
+
+	w.Header().Set("Content-Type", mime)
+	http.ServeContent(w, r, "", time.Now(), bytes.NewReader(body))
+}
+
+func (me *Server) serveIconFfmpeg(r *http.Request) ([]byte, string) {
 	filePath := me.filePath(r.URL.Query().Get("path"))
+
+	cached, ok := me.ServiceCache.Get(filePath + ":ffmpeg:img")
+	if ok {
+		return cached.([]byte), "jpeg"
+	}
+
+	args := []string{"-threads", "2", "-loglevel", "error", "-y", "-skip_frame", "noref", "-ss", "00:00:10", "-i", filePath, "-filter_complex", "thumbnail=100,scale=720:-1", "-frames:v", "1", "-f", "image2", "-"}
+	//ffmpeg
+	ffmpegPath := os.Getenv("FFMPEG_PATH")
+	if len(ffmpegPath) == 0 {
+		ffmpegPath = "ffmpeg"
+	}
+	cmd := exec.Command(ffmpegPath, args...)
+	// cmd.Stderr = os.Stderr
+	body, err := cmd.Output()
+	if err != nil {
+		me.Logger.Println("ffmpeg failed:", err)
+	}
+
+	me.ServiceCache.Set(filePath+":ffmpeg:img", body, cache.NoExpiration)
+
+	return body, "jpeg"
+}
+
+func (me *Server) serveIconFfmpegthumbnailer(r *http.Request) ([]byte, string) {
+	filePath := me.filePath(r.URL.Query().Get("path"))
+
+	cached, ok := me.ServiceCache.Get(filePath + ":thumbnailer:img")
+	if ok {
+		return cached.([]byte), me.Icons[0].Mimetype
+	}
+
 	c := r.URL.Query().Get("c")
 	if c == "" {
 		c = "png"
@@ -673,13 +727,12 @@ func (me *Server) serveIcon(w http.ResponseWriter, r *http.Request) {
 	// cmd.Stderr = os.Stderr
 	body, err := cmd.Output()
 	if err != nil {
-		// serve 1st Icon if no ffmpegthumbnailer
-		w.Header().Set("Content-Type", me.Icons[0].Mimetype)
-		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(me.Icons[0].Bytes))
-		// http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, ""
 	}
-	http.ServeContent(w, r, "", time.Now(), bytes.NewReader(body))
+
+	me.ServiceCache.Set(filePath+":thumbnailer:img", body, cache.NoExpiration)
+
+	return body, me.Icons[0].Mimetype
 }
 
 func (me *Server) serveSubtitle(w http.ResponseWriter, r *http.Request) {
@@ -980,9 +1033,10 @@ func (srv *Server) Init() (err error) {
 		}
 		srv.Interfaces = tmp
 	}
-	if srv.FFProbeCache == nil {
-		srv.FFProbeCache = dummyFFProbeCache{}
+	if srv.FFCache == nil {
+		srv.FFCache = dummyFFProbeCache{}
 	}
+	srv.ServiceCache = cache.New(cache.NoExpiration, cache.NoExpiration)
 	srv.httpServeMux = http.NewServeMux()
 	srv.rootDeviceUUID = makeDeviceUuid(srv.FriendlyName)
 	srv.rootDescXML, err = xml.MarshalIndent(
@@ -1093,11 +1147,11 @@ func (srv *Server) ffmpegProbe(path string) (info *ffprobe.Info, err error) {
 		return
 	}
 	key := ffmpegInfoCacheKey{path, fi.ModTime().UnixNano()}
-	value, ok := srv.FFProbeCache.Get(key)
+	value, ok := srv.FFCache.Get(key)
 	if !ok {
 		info, err = ffprobe.Run(path)
 		err = suppressFFmpegProbeDataErrors(err)
-		srv.FFProbeCache.Set(key, info)
+		srv.FFCache.Set(key, info)
 		return
 	}
 	info = value.(*ffprobe.Info)

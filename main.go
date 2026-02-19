@@ -24,6 +24,7 @@ import (
 
 	"github.com/anacrolix/log"
 	"github.com/nfnt/resize"
+	"github.com/patrickmn/go-cache"
 
 	"github.com/anacrolix/dms/dlna/dms"
 	"github.com/anacrolix/dms/rrcache"
@@ -188,10 +189,10 @@ func mainErr() error {
 		logger.Printf("Dynamic streams ARE allowed")
 	}
 
-	cache := &fFprobeCache{
+	probecache := &fFprobeCache{
 		c: rrcache.New(64 << 20),
 	}
-	if err := cache.load(config.FFprobeCachePath); err != nil {
+	if err := probecache.load(config.FFprobeCachePath); err != nil {
 		log.Print(err)
 	}
 
@@ -230,7 +231,8 @@ func mainErr() error {
 		}(),
 		FriendlyName:        config.FriendlyName,
 		RootObjectPath:      filepath.Clean(config.Path),
-		FFProbeCache:        cache,
+		FFCache:             probecache,
+		ServiceCache:        cache.New(cache.NoExpiration, cache.NoExpiration),
 		LogHeaders:          config.LogHeaders,
 		NoTranscode:         config.NoTranscode,
 		AllowDynamicStreams: config.AllowDynamicStreams,
@@ -288,7 +290,7 @@ func mainErr() error {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := cache.save(config.FFprobeCachePath); err != nil {
+	if err := probecache.save(config.FFprobeCachePath); err != nil {
 		log.Print(err)
 	}
 	return nil

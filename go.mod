@@ -12,5 +12,6 @@ require (
 
 require (
 	github.com/anacrolix/generics v0.0.1 // indirect
+	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
 )
